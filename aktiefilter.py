@@ -1,14 +1,19 @@
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
 import json
-import os
+import threading
 
 app = Flask(__name__)
 
-# === Hjälpfunktion för RSI ===
+progress = {
+    "total": 1,
+    "done": 0,
+    "status": "idle"
+}
+
 def calc_rsi(prices, period=14):
     delta = prices.diff()
     gain = delta.where(delta > 0, 0).rolling(period).mean()
@@ -16,33 +21,31 @@ def calc_rsi(prices, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-@app.route("/")
-def home():
-    return jsonify({"message": "Servern fungerar! Prova /portfolio för att köra screening."})
+def analyze_stocks():
+    global progress
+    progress["status"] = "running"
+    results = []
 
-@app.route("/portfolio")
-def portfolio():
     try:
+        # === 1. Hämta alla tickers ===
         url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
         tickers_df = pd.read_csv(url, sep="|")
         symbols = [s for s in tickers_df["Symbol"].dropna().tolist() if s.isalpha() and len(s) <= 5]
+        progress["total"] = len(symbols)
 
-        results = []
-
+        # === 2. Loopa igenom batchar ===
         for i in range(0, len(symbols), 10):
             batch = symbols[i:i+10]
             try:
                 data = yf.download(batch, period="6mo", interval="1d", auto_adjust=True, progress=False)
                 if data.empty:
                     continue
-
                 closes = data["Close"] if isinstance(data["Close"], pd.DataFrame) else pd.DataFrame({batch[0]: data["Close"]})
 
                 for ticker in closes.columns:
                     prices = closes[ticker].dropna()
                     if len(prices) < 30:
                         continue
-
                     last = prices.iloc[-1]
                     sma50 = prices.rolling(50).mean().iloc[-1]
                     sma200 = prices.rolling(200).mean().iloc[-1] if len(prices) >= 200 else np.nan
@@ -87,22 +90,52 @@ def portfolio():
                             "RevenueGrowth": round(revenue_growth, 2) if not np.isnan(revenue_growth) else None,
                             "Score": score
                         })
-                print(f"✅ {i+10}/{len(symbols)} analyserade")
-                time.sleep(1)  # lägre paus för molnet
+                progress["done"] = min(progress["done"] + len(batch), progress["total"])
+                time.sleep(1)
             except Exception as e:
                 print(f"⚠️ Batch fel: {e}")
                 continue
 
+        # === 3. Spara resultat ===
         df = pd.DataFrame(results)
         df = df.sort_values("Score", ascending=False)
         top = df.head(50)
+        top.to_json("top_stocks.json", orient="records")
 
-        # Spara JSON-fil
-        json_file = "top_stocks.json"
-        top.to_json(json_file, orient="records")
+        progress["status"] = "done"
+    except Exception as e:
+        progress["status"] = f"error: {str(e)}"
 
-        # Returnera resultat som JSON
+@app.route("/portfolio")
+def start_analysis():
+    global progress
+    if progress["status"] == "running":
+        return jsonify({"message": "Analys körs redan..."})
+    progress = {"total": 1, "done": 0, "status": "running"}
+    threading.Thread(target=analyze_stocks).start()
+    return jsonify({"message": "Analysen har startat. Följ status via /status"})
+
+@app.route("/status")
+def status():
+    if progress["status"] == "running":
+        pct = round(progress["done"] / progress["total"] * 100, 2)
         return jsonify({
-            "count": len(top),
-            "message": "Analys klar. De 50 bästa aktierna returneras.",
-            "results": json.loads(top.to_json(orient="records")),
+            "status": "running",
+            "progress": f"{pct}%",
+            "done": progress["done"],
+            "total": progress["total"]
+        })
+    else:
+        return jsonify(progress)
+
+@app.route("/download_json")
+def download_json():
+    try:
+        with open("top_stocks.json", "r") as f:
+            data = json.load(f)
+        return jsonify(data)
+    except FileNotFoundError:
+        return jsonify({"error": "JSON-fil finns inte. Kör /portfolio först."})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
