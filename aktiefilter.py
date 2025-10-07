@@ -136,6 +136,17 @@ def download_json():
         return jsonify(data)
     except FileNotFoundError:
         return jsonify({"error": "JSON-fil finns inte. Kör /portfolio först."})
+@app.route("/")
+def home():
+    return jsonify({
+        "message": "Välkommen till Aktie-API:t!",
+        "endpoints": {
+            "/portfolio": "Startar analysen av NASDAQ-aktier",
+            "/status": "Visar hur långt analysen har kommit",
+            "/download_json": "Hämtar top 50 aktier i JSON-format"
+        }
+    })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
